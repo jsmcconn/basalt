@@ -1,5 +1,10 @@
 # Precision and quality
 
+This downstream branch retains the v0.1.0 initial expert ranking. CPU and GPU expert paths
+round differently, so changing the ranking can change logits even with identical weights.
+The upstream tables below describe their recorded profiles, rather than measurements of
+this retained ranking; qualify the engine and ranking together for deployment.
+
 This page shows what precision Basalt computes in, that speculative decoding (MTP) does not change its output, and how
 its quality compares with llama.cpp on the same GGUFs against the same Q8_0 reference.
 

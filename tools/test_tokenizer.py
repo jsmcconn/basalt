@@ -73,6 +73,25 @@ def make(tokens, merges, types, cap=None):
     return tk
 
 
+class Normalization(unittest.TestCase):
+    def test_explicit_nfc_and_raw_literal_spans(self):
+        tokens, merges, types = synthetic(CORPUS)
+        raw = T.Tokenizer(tokens, merges, types)
+        nfc = T.Tokenizer(tokens, merges, types, normalizer="NFC")
+        self.assertNotEqual(raw.encode("e\u0301!"), nfc.encode("e\u0301!"))
+        self.assertEqual(nfc.encode("e\u0301!"), raw.encode("é!"))
+        self.assertEqual(nfc.encode("e\u0301<think>x", plain=[(2, 9)]),
+                         raw.encode("é<think>x", plain=[(1, 8)]))
+        md = {"tokenizer.ggml.model": "gpt2", "tokenizer.ggml.tokens": tokens,
+              "tokenizer.ggml.merges": merges, "tokenizer.ggml.token_type": types,
+              "tokenizer.ggml.normalizer": "NFC"}
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(T.extract_metadata(md, tmp)["normalizer"], "NFC")
+            self.assertEqual(T.Tokenizer.from_metadata(md).encode("e\u0301!"), nfc.encode("e\u0301!"))
+        with self.assertRaises(ValueError):
+            T.Tokenizer(tokens, merges, types, normalizer="NFD")
+
+
 class PieceMemo(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

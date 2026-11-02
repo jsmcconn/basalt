@@ -39,16 +39,16 @@ Inputs
   --draft-vocab FILE the token subset the draft head may propose (int32 ids; needs --mtp-source)
 
 From an NVFP4 checkpoint (--sections-from with --checkpoint)
-  --checkpoint DIR   NVIDIA Model Optimizer's NVFP4 safetensors (config.json, the model-NNNNN-of-NNNNN shards, the FP8
-                     n-gram table shards, tokenizer files, generation_config.json, README.md). The routed experts keep
+  --checkpoint DIR   NVIDIA Model Optimizer's NVFP4 safetensors (config.json, numbered or layer/tail shards, FP8 or
+                     split BF16 n-gram shards, tokenizer files, generation_config.json, README.md). The routed experts keep
                      their E2M1 codes and UE4M3 scales, moved into Basalt's blocks with the FP32 tail {s_gate, s_up,
                      s_down, 0} from weight_scale_2. A dense projection the checkpoint stores in a quantized form is
                      decoded to its values and quantized once: MXFP8 (E4M3 codes, one E8M0 scale per 32) and FP8 (one
                      FP32 scale) to Q6_K, NVFP4 (as NVIDIA's quantization-aware distillation exports its shared
                      experts) likewise to Q6_K or Q8_0, and BF16 where the checkpoint has BF16. Each form goes to Q6_K
                      where rows are whole 256-value blocks, Q8_0 elsewhere and for the output head and token embedding;
-                     the other tensors keep BF16 or become F32/F16 as the engine reads them; the n-gram table is FP8
-                     code x scale as Q8_0. The GGUF metadata and the tokenizer come from the checkpoint's files.
+                     the other tensors keep BF16 or become F32/F16 as the engine reads them; the n-gram table uses FP8
+                     code x scale or BF16 values as Q8_0. The GGUF metadata and the tokenizer come from the checkpoint's files.
                      Model Optimizer's FP4-Local layout is read too: the shards in tensors/, expert scales as CSF stream
                      pairs (decoded bit for bit), MXFP8 projections, F32 norm weights, and an NVFP4 n-gram table (E2M1
                      code x UE4M3 block scale x weight_scale_2 as Q8_0)

@@ -104,6 +104,49 @@ class Nvfp4RepackTest(unittest.TestCase):
             self.assertIsInstance(C._expert_job(([ent], 1)), str)
 
 
+class PleBf16Test(unittest.TestCase):
+    def test_split_table_order_rounding_and_validation(self):
+        import multiprocessing
+        stem = "model.language_model.layers.1.ple.ple_embedding.ngram_embedding."
+        rng = np.random.default_rng(8)
+        arrays = [(rng.integers(-64, 65, size=(r, S.PLE_DIM)) / 32).astype(np.float32) for r in (3, 5, 2)]
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            (d / "config.json").write_text(json.dumps({"text_config": {"split_ngram_parts": 3}}))
+            write_safetensors(d / "model-layer-00000.safetensors", {"lm_head.weight": ("BF16", [1], b"\0\0")})
+            write_safetensors(d / "model-tail.safetensors", {"model.language_model.embed_tokens.weight": ("BF16", [1], b"\0\0")})
+            # File order deliberately differs from numeric shard order.
+            for file, ids in (("embedding-a", [2, 0]), ("embedding-z", [1])):
+                write_safetensors(d / (file + ".safetensors"), {
+                    stem + f"shard_{i}.weight": ("BF16", arrays[i].shape, bf16(arrays[i]).tobytes()) for i in ids})
+            ck = C.Checkpoint(d)
+            self.assertEqual(len(ck.shards), 2)
+            self.assertEqual(ck.order, ["lm_head.weight", "model.language_model.embed_tokens.weight"])
+            ple = C.PleBf16(ck, chunk_rows=2)
+            want = S.q8_0(np.concatenate(arrays).reshape(-1))
+            self.assertEqual(ple.rows, 10)
+            self.assertEqual(ple.nbytes, len(want))
+            with multiprocessing.Pool(2) as pool:
+                self.assertEqual(b"".join(ple.chunks(pool, depth=2)), want)
+            import ggufq
+            got = ggufq.dequantize(np.frombuffer(want, np.uint8), ggufq.GGMLQuantizationType.Q8_0).reshape(-1, 32)
+            ref = np.concatenate(arrays).reshape(-1, 32)
+            step = np.abs(ref).max(axis=1, keepdims=True) / 127
+            self.assertTrue((np.abs(got - ref) <= step * 0.6 + 1e-9).all())
+            del ck.t[stem + "shard_1.weight"]
+            with self.assertRaises(S.ConvertError):
+                C.PleBf16(ck)
+            ck = C.Checkpoint(d)
+            ck.text["split_ngram_parts"] = 4
+            with self.assertRaises(S.ConvertError):
+                C.PleBf16(ck)
+            write_safetensors(d / "nan.safetensors", {"x": ("BF16", [S.PLE_DIM],
+                bf16(np.full(S.PLE_DIM, np.inf, np.float32)).tobytes())})
+            _, off = S.read_safetensors_header(d / "nan.safetensors")
+            with self.assertRaises(S.ConvertError):
+                C._ple_bf16_job((d / "nan.safetensors", off, 1))
+
+
 GDN = 2 * S.GDN_K_HEADS * S.GDN_HEAD + S.GDN_V_HEADS * S.GDN_HEAD      # q, k, then the value channels
 
 

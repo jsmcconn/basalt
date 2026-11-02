@@ -44,9 +44,10 @@ class Checkpoint:
         self.config = json.loads(cfg.read_text(encoding="utf-8"))
         self.text = self.config.get("text_config", self.config)
         self.files = sorted(self.dir.glob("*.safetensors"))
-        self.shards = [p for p in self.files if re.fullmatch(r"model-\d+-of-\d+\.safetensors", p.name)]
+        self.shards = [p for p in self.files if re.fullmatch(
+            r"model-(?:\d+-of-\d+|layer-\d+|tail)\.safetensors", p.name)]
         if not self.shards:
-            raise S.ConvertError(f"{self.dir}: no model-NNNNN-of-NNNNN.safetensors shards")
+            raise S.ConvertError(f"{self.dir}: no model safetensors shards")
         self.t, self.order = {}, []
         for p in self.files:
             head, base = S.read_safetensors_header(p)
@@ -60,7 +61,7 @@ class Checkpoint:
                 if p in self.shards:
                     self.order.append(k)
                 elif not SKIP.match(k):
-                    raise S.ConvertError(f"{p.name} is not a model-NNNNN-of-NNNNN shard and holds {k}, which would be "
+                    raise S.ConvertError(f"{p.name} is not a model shard and holds {k}, which would be "
                                          "dropped; only the n-gram table, drafter and vision tensors may live there")
 
     def raw(self, name) -> np.ndarray:
@@ -605,3 +606,49 @@ def ple_table(ck: Checkpoint) -> pathlib.Path:
     if len(hits) != 1:
         raise S.ConvertError(f"{ck.dir}: {len(hits)} files hold an ngram_embedding.weight_scale")
     return hits[0]
+
+
+def _ple_bf16_job(args):
+    path, off, rows = args
+    raw = np.fromfile(path, dtype="<u2", count=rows * S.PLE_DIM, offset=off)
+    x = S._bf16_to_f32(raw)
+    if not np.isfinite(x).all():
+        raise S.ConvertError("the BF16 n-gram table holds a non-finite value")
+    return S.q8_0(x)
+
+
+class PleBf16:
+    """Split BF16 n-gram shards, in numeric shard order, as Q8_0 rows."""
+
+    def __init__(self, ck: Checkpoint, chunk_rows: int = 65536):
+        self.chunk_rows = chunk_rows
+        shards = {}
+        stems = set()
+        for name, (path, off, dt, shape, size) in ck.t.items():
+            m = re.fullmatch(r"(.+\.ngram_embedding\.)shard_(\d+)\.weight", name)
+            if not m:
+                continue
+            i = int(m.group(2))
+            if dt != "BF16" or len(shape) != 2 or shape[0] <= 0 or shape[1] != S.PLE_DIM \
+                    or size != shape[0] * S.PLE_DIM * 2 or i in shards:
+                raise S.ConvertError(f"{name}: expected unique BF16 rows of {S.PLE_DIM}")
+            stems.add(m.group(1))
+            shards[i] = (path, off, shape[0])
+        if len(stems) != 1 or sorted(shards) != list(range(len(shards))):
+            raise S.ConvertError("the BF16 n-gram table needs one complete contiguous set of shards")
+        expected = int(ck.text["split_ngram_parts"])
+        if len(shards) != expected:
+            raise S.ConvertError(f"the BF16 n-gram table has {len(shards)} shards, expected {expected}")
+        self.shards = [shards[i] for i in range(expected)]
+        self.paths = sorted({p for p, _, _ in self.shards})
+        self.rows = sum(rows for _, _, rows in self.shards)
+        self.nbytes = self.rows * (S.PLE_DIM // 32 * 34)
+        self.scale = None
+
+    def jobs(self):
+        for path, off, rows in self.shards:
+            for r in range(0, rows, self.chunk_rows):
+                yield path, off + r * S.PLE_DIM * 2, min(self.chunk_rows, rows - r)
+
+    def chunks(self, pool, depth: int = 16):
+        yield from bounded_imap(pool, _ple_bf16_job, self.jobs(), depth)

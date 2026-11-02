@@ -18,6 +18,15 @@ build. Geometry: 2560 hidden, 4 hyper-connection streams, 48 layers (36 GDN, 12 
 - **Only one rounding costs measurable quality by default:** the Q6_K dense projections, about 0.006 KLD and 0.3 to 0.6 points of
   top-1 against NVIDIA's precision. Everything else costs about 0.001 or less.
 
+Split BF16 n-gram tables from Model Optimizer checkpoints convert directly to Q8_0 in numeric shard order,
+using the same blocks of 32 and ggml rounding as the FP8 path. This adds Q8_0 rounding to the original BF16 values;
+there is no intermediate FP8 conversion. `PleBf16Test` checks byte equality with the direct Q8_0 quantizer,
+the half-step error bound including fp16 scale rounding, file ordering, missing shards and non-finite rejection.
+Runtime kernels, dense conversion and NVFP4 expert repacking are unchanged by this converter support.
+Checkpoint tokenizers retain explicit NFC normalization on ordinary text before BPE; literal-span offsets still
+refer to the raw prompt. A legacy Qwen2 split needs an explicit Qwen3.5 regex override. Tokenizers without
+normalization metadata retain their byte-level behavior.
+
 ## Where each stage rounds
 
 | Stage | Format | Arithmetic |

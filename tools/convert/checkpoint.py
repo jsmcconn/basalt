@@ -54,9 +54,9 @@ class Checkpoint:
         self.config = json.loads(cfg.read_text(encoding="utf-8"))
         self.text = self.config.get("text_config", self.config)
         self.files = sorted(self.dir.glob("*.safetensors")) + sorted(self.dir.glob("tensors/*.safetensors"))
-        self.shards = [p for p in self.files if re.fullmatch(r"model-\d+-of-\d+\.safetensors", p.name)]
+        self.shards = [p for p in self.files if re.fullmatch(r"model-(?:\d+-of-\d+|layer-\d+|tail)\.safetensors", p.name)]
         if not self.shards:
-            raise S.ConvertError(f"{self.dir}: no model-NNNNN-of-NNNNN.safetensors shards")
+            raise S.ConvertError(f"{self.dir}: no model safetensors shards")
         side = side or {}
         self.t, self.order = {}, []
         for p in self.files:
@@ -748,10 +748,58 @@ def model_kv(ck: Checkpoint, ple_dim: int, file_type: int, name: str | None) -> 
     return kv
 
 
+def _ple_bf16_job(args):
+    path, off, rows = args
+    raw = np.fromfile(path, dtype="<u2", count=rows * S.PLE_DIM, offset=off)
+    x = S._bf16_to_f32(raw)
+    if not np.isfinite(x).all():
+        raise S.ConvertError("the BF16 n-gram table holds a non-finite value")
+    return S.q8_0(x)
+
+
+class PleBf16:
+    """Split BF16 n-gram shards, in numeric shard order, as Q8_0 rows."""
+
+    def __init__(self, ck: Checkpoint, chunk_rows: int = 65536):
+        self.chunk_rows = chunk_rows
+        shards = {}
+        stems = set()
+        for name, (path, off, dt, shape, size) in ck.t.items():
+            m = re.fullmatch(r"(.+\.ngram_embedding\.)shard_(\d+)\.weight", name)
+            if not m:
+                continue
+            i = int(m.group(2))
+            if dt != "BF16" or len(shape) != 2 or shape[0] <= 0 or shape[1] != S.PLE_DIM \
+                    or size != shape[0] * S.PLE_DIM * 2 or i in shards:
+                raise S.ConvertError(f"{name}: expected unique BF16 rows of {S.PLE_DIM}")
+            stems.add(m.group(1))
+            shards[i] = (path, off, shape[0])
+        if len(stems) != 1 or sorted(shards) != list(range(len(shards))):
+            raise S.ConvertError("the BF16 n-gram table needs one complete contiguous set of shards")
+        expected = int(ck.text["split_ngram_parts"])
+        if len(shards) != expected:
+            raise S.ConvertError(f"the BF16 n-gram table has {len(shards)} shards, expected {expected}")
+        self.shards = [shards[i] for i in range(expected)]
+        self.paths = sorted({p for p, _, _ in self.shards})
+        self.rows = sum(rows for _, _, rows in self.shards)
+        self.nbytes = self.rows * (S.PLE_DIM // 32 * 34)
+        self.scale = None
+        self.conversion = {"src_type": "BF16", "dst_type": "Q8_0", "scale": self.scale,
+                           "method": "BF16 values, Q8_0 blocks of 32 (ggml reference rounding)"}
+
+    def jobs(self):
+        for path, off, rows in self.shards:
+            for r in range(0, rows, self.chunk_rows):
+                yield path, off + r * S.PLE_DIM * 2, min(self.chunk_rows, rows - r)
+
+    def chunks(self, pool, depth: int = 16):
+        yield from bounded_imap(pool, _ple_bf16_job, self.jobs(), depth)
+
+
 def ple_table(ck: Checkpoint):
-    """The n-gram table's reader: NVFP4 shards with one FP32 weight_scale_2 (PleNvfp4), or FP8 shards with one BF16
-    weight_scale (model_sections.PleFp8, given the files that hold them; a release that consolidated its files may
-    spread them over several)."""
+    """Read NVFP4, FP8 or split BF16 n-gram table shards as Q8_0 rows."""
+    if any(re.search(r"ngram_embedding\.shard_\d+\.weight$", k) and t[2] == "BF16" for k, t in ck.t.items()):
+        return PleBf16(ck)
     if any(k.endswith("ngram_embedding.weight_scale_2") for k in ck.t):
         return PleNvfp4(ck)
     hits = sorted({ck.t[k][0] for k in ck.t

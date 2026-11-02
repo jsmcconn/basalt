@@ -181,9 +181,10 @@ def build_model(a, cfg: dict, logs, multi: bool, known) -> Service:
             tokens[i] = t
         merges = (tpath / "merges.txt").read_text(encoding="utf-8").split("\n")
         types = json.loads((tpath / "token_type.json").read_text())
-        pre = json.loads((tpath / "tokenizer.json").read_text(encoding="utf-8")).get("pre", "qwen35") \
-            if (tpath / "tokenizer.json").exists() else "qwen35"
-        tok = ST.Tokenizer(tokens, merges, types, pre=pre)
+        tokenizer_path = tpath / "tokenizer.json"
+        tokenizer_config = json.loads(tokenizer_path.read_text(encoding="utf-8")) if tokenizer_path.is_file() else {}
+        tok = ST.Tokenizer(tokens, merges, types, pre=tokenizer_config.get("pre", "qwen35"),
+                           normalizer=tokenizer_config.get("normalizer"))
     has_grammar = False
     if not a.mock_engine:
         vision = None

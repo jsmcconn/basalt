@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import pathlib
 import sys
+import unicodedata
 
 import regex
 
@@ -46,11 +47,14 @@ QWEN35_PATTERN = (
 
 class Tokenizer:
     def __init__(self, tokens: list[str], merges: list[str], token_types: list[int] | None = None,
-                 pre: str = "qwen35", special_ids: dict[str, int] | None = None):
+                 pre: str = "qwen35", special_ids: dict[str, int] | None = None, normalizer: str | None = None):
         self.tokens = tokens
         self.pre = pre
         self.token_types = token_types
         self.special_ids = special_ids or {}
+        if normalizer not in (None, "NFC"):
+            raise ValueError(f"unsupported tokenizer normalizer: {normalizer}")
+        self.normalizer = normalizer
         self.ids = {t: i for i, t in enumerate(tokens)}
         if len(self.ids) != len(tokens):
             raise ValueError("vocabulary has duplicate tokens: %d entries, %d unique"
@@ -105,7 +109,7 @@ class Tokenizer:
                    if k.startswith("tokenizer.ggml.") and k.endswith("_token_id")}
         return cls(list(md["tokenizer.ggml.tokens"]), list(md["tokenizer.ggml.merges"]),
                    list(md.get("tokenizer.ggml.token_type") or []) or None,
-                   md.get("tokenizer.ggml.pre", "qwen35"), special)
+                   md.get("tokenizer.ggml.pre", "qwen35"), special, md.get("tokenizer.ggml.normalizer"))
 
     # -------------------------------------------------------------- the algorithm
     def _bpe(self, word: str) -> list[str]:
@@ -166,6 +170,8 @@ class Tokenizer:
     PIECE_CACHE_MAX = 200_000    # pre-tokenizer pieces remembered; bounds the memo's memory
 
     def _encode_plain(self, text: str) -> list[int]:
+        if self.normalizer:
+            text = unicodedata.normalize(self.normalizer, text)
         out: list[int] = []
         # A piece's ids depend on the piece alone, so repeated pieces (most of a resent conversation) are looked up
         # instead of merged again. Same ids as running _bpe each time. Idea from Strata f346dc6 (MIT).
@@ -256,6 +262,8 @@ def extract_metadata(md: dict, out_dir) -> dict:
         "pre_pattern": QWEN35_PATTERN,
         "pre_pattern_source": "llama.cpp src/llama-vocab.cpp (LLAMA_VOCAB_PRE_TYPE_QWEN35)",
     }
+    if tk.normalizer:
+        cfg["normalizer"] = tk.normalizer
     (out / "vocab.json").write_text(json.dumps(tk.ids, ensure_ascii=False), encoding="utf-8")
     (out / "merges.txt").write_text("\n".join("%s %s" % k for k, _ in
                                               sorted(tk.ranks.items(), key=lambda kv: kv[1])), encoding="utf-8",

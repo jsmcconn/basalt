@@ -42,6 +42,9 @@ using the same blocks of 32 and ggml rounding as the FP8 path. This adds Q8_0 ro
 there is no intermediate FP8 conversion. `PleBf16Test` checks byte equality with the direct Q8_0 quantizer, the
 half-step error bound including fp16 scale rounding, file ordering, missing shards and non-finite rejection.
 The runtime kernels, dense conversion and NVFP4 expert repack are unchanged.
+Checkpoint tokenizers retain explicit NFC normalization, applied to ordinary text before BPE while literal-span
+offsets still refer to the raw prompt. A legacy Qwen2 split is accepted only with the explicit Qwen3.5 regex override
+in the tokenizer config. Tokenizers without normalization metadata retain their existing byte-level behavior.
 
 Sources are `file:line` under `src/`, `include/basalt/` and `tools/convert/`. Model geometry: n_embd 2560, 4
 hyper-connection streams, 48 layers (36 GDN, 12 QSA), 512 experts, top-10, head_dim 256.

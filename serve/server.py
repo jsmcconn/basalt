@@ -149,7 +149,9 @@ def main() -> int:
             tokens[i] = t
         merges = (tpath / "merges.txt").read_text(encoding="utf-8").split("\n")
         types = json.loads((tpath / "token_type.json").read_text())
-        tok = ST.Tokenizer(tokens, merges, types)
+        tokenizer_path = tpath / "tokenizer.json"
+        tokenizer_config = json.loads(tokenizer_path.read_text()) if tokenizer_path.is_file() else {}
+        tok = ST.Tokenizer(tokens, merges, types, normalizer=tokenizer_config.get("normalizer"))
     if not a.mock_engine:
         vision = None
         env = child_env(cfg)

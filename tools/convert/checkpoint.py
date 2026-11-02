@@ -29,6 +29,7 @@ UNUSED, NORMAL, CONTROL, USER_DEFINED = 5, 1, 3, 4
 # The pre-tokenizer split of the qwen35 vocabulary as Hugging Face tokenizers writes it.
 QWEN35_HF_SPLIT = (r"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?[\p{L}\p{M}]+|\p{N}"
                    r"| ?[^\s\p{L}\p{M}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+")
+QWEN2_HF_SPLIT = QWEN35_HF_SPLIT.replace(r"[\p{L}\p{M}]+", r"\p{L}+").replace(r"\p{M}", "")
 VALUES_PER_JOB = 1 << 22
 TYPE_ID = {"F32": 0, "F16": 1, "Q8_0": 8, "Q6_K": 14, "BF16": 30}
 
@@ -462,7 +463,8 @@ def tokenizer_kv(ck: Checkpoint) -> dict:
         raise S.ConvertError(f"tokenizer.json: a {model.get('type')} model; only byte-level BPE is converted")
     pre = tj.get("pre_tokenizer") or {}
     splits = [p.get("pattern", {}).get("Regex") for p in pre.get("pretokenizers", []) if p.get("type") == "Split"]
-    if splits != [QWEN35_HF_SPLIT]:
+    configured_qwen35 = tcfg.get("pretokenize_regex") == QWEN35_HF_SPLIT and splits == [QWEN2_HF_SPLIT]
+    if splits != [QWEN35_HF_SPLIT] and not configured_qwen35:
         raise S.ConvertError("tokenizer.json: the pre-tokenizer is not the qwen35 split")
     n_vocab = int(ck.text["vocab_size"])
     rev = {int(i): t for t, i in model["vocab"].items()}
@@ -495,6 +497,11 @@ def tokenizer_kv(ck: Checkpoint) -> dict:
     gen = json.loads((d / "generation_config.json").read_text(encoding="utf-8")) if (d / "generation_config.json").is_file() else {}
     kv = {"tokenizer.ggml.model": "gpt2", "tokenizer.ggml.pre": "qwen35", "tokenizer.ggml.tokens": tokens,
           "tokenizer.ggml.token_type": types, "tokenizer.ggml.merges": merges}
+    normalizer = tj.get("normalizer")
+    if normalizer is not None:
+        if normalizer != {"type": "NFC"}:
+            raise S.ConvertError(f"tokenizer.json: unsupported normalizer {normalizer}")
+        kv["tokenizer.ggml.normalizer"] = "NFC"
     eos, pad = token_id("eos_token"), token_id("pad_token")
     bos = token_id("bos_token")
     if bos is None:

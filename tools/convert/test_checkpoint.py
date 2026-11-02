@@ -419,6 +419,22 @@ class TokenizerKvTest(unittest.TestCase):
             self.assertEqual(kv["tokenizer.ggml.merges"], ["a b"])
             self.assertEqual([kv[f"tokenizer.ggml.{k}_token_id"] for k in ("eos", "padding", "bos")], [4, 4, 4])
             self.assertEqual(kv["tokenizer.chat_template"], "{{ x }}")
+            tj["pre_tokenizer"]["pretokenizers"][0]["pattern"]["Regex"] = C.QWEN2_HF_SPLIT
+            (d / "tokenizer.json").write_text(json.dumps(tj))
+            with self.assertRaises(S.ConvertError):
+                C.tokenizer_kv(C.Checkpoint(d))
+            config = json.loads((d / "tokenizer_config.json").read_text())
+            config["pretokenize_regex"] = C.QWEN35_HF_SPLIT
+            (d / "tokenizer_config.json").write_text(json.dumps(config))
+            self.assertEqual(C.tokenizer_kv(C.Checkpoint(d)), kv)
+            tj["normalizer"] = {"type": "NFC"}
+            (d / "tokenizer.json").write_text(json.dumps(tj))
+            self.assertEqual(C.tokenizer_kv(C.Checkpoint(d))["tokenizer.ggml.normalizer"], "NFC")
+            tj["normalizer"] = {"type": "NFD"}
+            (d / "tokenizer.json").write_text(json.dumps(tj))
+            with self.assertRaises(S.ConvertError):
+                C.tokenizer_kv(C.Checkpoint(d))
+            tj.pop("normalizer")
             tj["pre_tokenizer"]["pretokenizers"][0]["pattern"]["Regex"] = r"\s+"
             (d / "tokenizer.json").write_text(json.dumps(tj))
             with self.assertRaises(S.ConvertError):

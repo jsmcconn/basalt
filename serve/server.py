@@ -217,8 +217,9 @@ def build_model(a, cfg: dict, logs, multi: bool, known) -> Service:
             tokens[i] = t
         merges = files["merges.txt"].decode("utf-8").split("\n")
         types = json.loads(files["token_type.json"])
-        pre = json.loads(files["tokenizer.json"].decode("utf-8")).get("pre", "qwen35") if "tokenizer.json" in files else "qwen35"
-        tok = ST.Tokenizer(tokens, merges, types, pre=pre)
+        tokenizer_config = json.loads(files["tokenizer.json"].decode("utf-8")) if "tokenizer.json" in files else {}
+        tok = ST.Tokenizer(tokens, merges, types, pre=tokenizer_config.get("pre", "qwen35"),
+                           normalizer=tokenizer_config.get("normalizer"))
     has_grammar = False
     if not a.mock_engine:
         vision = None

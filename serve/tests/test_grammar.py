@@ -284,7 +284,7 @@ ONE_CARD = {"devices": "0", "cards": [{"smi": 0}], "notes": [], "warning": "", "
 class EngineStart(unittest.TestCase):
     """What main() hands the engine when `grammar` comes from the config file or the command line."""
 
-    def engine_args(self, server_block, cli=(), flags=b"\0--grammar\0--kv\0"):
+    def engine_args(self, server_block, cli=(), flags=b"\0--grammar\0--kv\0", tokenizer_config=None):
         from unittest import mock
         from serve import server
         seen = {}
@@ -306,16 +306,23 @@ class EngineStart(unittest.TestCase):
             (tokdir / "vocab.json").write_text("{}")
             (tokdir / "merges.txt").write_text("")
             (tokdir / "token_type.json").write_text("[]")
-            cfg = {"engine_bin": str(eng), "args": ["--serve"], "log": None, "tokenizer": {n: (tokdir / n).read_bytes() for n in ("vocab.json", "merges.txt", "token_type.json")}}
+            if tokenizer_config is not None:
+                (tokdir / "tokenizer.json").write_text(json.dumps(tokenizer_config))
+            tokenizer = mock.Mock(return_value=ByteTokenizer())
+            files = {n: (tokdir / n).read_bytes() for n in ("vocab.json", "merges.txt", "token_type.json")}
+            if tokenizer_config is not None:
+                files["tokenizer.json"] = (tokdir / "tokenizer.json").read_bytes()
+            cfg = {"engine_bin": str(eng), "args": ["--serve"], "log": None, "tokenizer": files}
             with mock.patch.object(sys, "argv", argv), \
                     mock.patch("serve.engine.modelfile.model_config", return_value=cfg), \
-                    mock.patch.dict(sys.modules, {"tokenizer": types.SimpleNamespace(Tokenizer=lambda *a, **k: ByteTokenizer())}), \
+                    mock.patch.dict(sys.modules, {"tokenizer": types.SimpleNamespace(Tokenizer=tokenizer)}), \
                     mock.patch.object(server, "ProcessEngine", fake), \
                     mock.patch.object(server, "model_plan", return_value=ONE_CARD):
                 try:
                     server.main()
                 except Stop:
                     pass
+            self.tokenizer_kwargs = tokenizer.call_args.kwargs
         return seen["args"]
 
     def test_config_file(self):
@@ -341,6 +348,12 @@ class EngineStart(unittest.TestCase):
 
     def test_engine_without_the_flag(self):
         self.assertEqual(self.engine_args({"grammar": True}, flags=b"\0--kv\0"), ["--serve", "--gpu", "0"])
+
+    def test_tokenizer_normalizer_from_pack(self):
+        self.engine_args({}, tokenizer_config={"normalizer": "NFC"})
+        self.assertEqual(self.tokenizer_kwargs, {"normalizer": "NFC"})
+        self.engine_args({})
+        self.assertEqual(self.tokenizer_kwargs, {"normalizer": None})
 
 
 if __name__ == "__main__":

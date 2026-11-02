@@ -18,13 +18,13 @@ Inputs
   --draft-vocab FILE the token subset the draft head may propose (int32 ids; needs --mtp-source)
 
 From an NVFP4 checkpoint (--sections-from with --checkpoint)
-  --checkpoint DIR   NVIDIA Model Optimizer's NVFP4 safetensors (config.json, the model-NNNNN-of-NNNNN shards, the FP8
-                     n-gram table file, tokenizer files, generation_config.json, README.md). The routed experts keep
+  --checkpoint DIR   Model Optimizer NVFP4 safetensors (config.json, model-NNNNN-of-NNNNN or model-layer/model-tail
+                     shards, FP8 or split BF16 n-gram table, tokenizer files, generation_config.json, README.md). The routed experts keep
                      their E2M1 codes and UE4M3 scales, moved into Basalt's blocks with the FP32 tail {s_gate, s_up,
                      s_down, 0} from weight_scale_2; the projections are quantized once from BF16 to Q6_K (Q8_0 where
                      rows are not whole 256-value blocks, and for the output head and token embedding); the other
                      tensors keep BF16 or become F32/F16 as the engine reads them; the n-gram table is FP8 code x scale
-                     as Q8_0. The GGUF metadata and the tokenizer come from the checkpoint's files.
+                     or BF16 values as Q8_0. The GGUF metadata and the tokenizer come from the checkpoint's files.
   --dense-q8-0       Q8_0 projections instead of Q6_K (the 8-bit dense variant)
   The drafter and vision sections come from BASE byte for byte; BASE's vocabulary must be the checkpoint's.
 
@@ -372,8 +372,15 @@ def from_checkpoint(a) -> None:
         ck = C.Checkpoint(a.checkpoint)
         experts = C.CheckpointExperts(ck)
         dense_src = C.CheckpointDense(ck, q6k)
-        ple_path = C.ple_table(ck)
-        ple = S.PleFp8(str(ple_path))
+        if any(k.endswith("ngram_embedding.weight_scale") for k in ck.t):
+            ple_path = C.ple_table(ck)
+            ple = S.PleFp8(str(ple_path))
+            ple_paths = [ple_path]
+            ple_type, ple_method = "F8_E4M3", "fp8 code x per-tensor BF16 scale"
+        else:
+            ple = C.PleBf16(ck)
+            ple_paths = ple.paths
+            ple_type, ple_method = "BF16", "BF16 values"
         kv = C.model_kv(ck, S.PLE_DIM, 18 if q6k else 7, a.name)
         dense = S.Dense(dense_src, False)
     except S.ConvertError as e:
@@ -440,7 +447,7 @@ def from_checkpoint(a) -> None:
                         "bytes": t.expected_bytes(), "offset": tensor_offsets[n]} for n, t in dense_src.tensors.items()}
             tens["per_layer_token_embd.weight"] = {"type": "Q8_0", "type_id": 8, "shape": [S.PLE_DIM, ple.rows],
                                                   "bytes": ple.nbytes, "offset": tensor_offsets["per_layer_token_embd.weight"]}
-            ck_files = sorted(set(ck.shards) | {ple_path})
+            ck_files = sorted(set(ck.shards) | set(ple_paths))
             meta = {
                 "format": "basalt", "version": 2, "name": a.name or base_meta.get("name"),
                 "converter": {"tool": "tools/convert/convert.py"},
@@ -449,8 +456,8 @@ def from_checkpoint(a) -> None:
                 "gguf_kv": kv,
                 "tensors": tens,
                 "conversions": {"compat_bf16": False, "tensors": [{
-                    "name": "per_layer_token_embd.weight", "src_type": "F8_E4M3", "dst_type": "Q8_0",
-                    "method": "fp8 code x per-tensor BF16 scale, Q8_0 blocks of 32 (ggml reference rounding)",
+                    "name": "per_layer_token_embd.weight", "src_type": ple_type, "dst_type": "Q8_0",
+                    "method": ple_method + ", Q8_0 blocks of 32 (ggml reference rounding)",
                     "scale": ple.scale}]},
                 "license": model_license(kv),
             }

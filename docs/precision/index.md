@@ -37,6 +37,12 @@ Test setup: one RTX 5090 at a 400 W power limit, an RTX 5060 Ti as the peer expe
 
 ## Decode path precision
 
+Split BF16 n-gram tables from Model Optimizer checkpoints are converted directly to Q8_0 in numeric shard order,
+using the same blocks of 32 and ggml rounding as the FP8 path. This adds Q8_0 rounding to the original BF16 values;
+there is no intermediate FP8 conversion. `PleBf16Test` checks byte equality with the direct Q8_0 quantizer, the
+half-step error bound including fp16 scale rounding, file ordering, missing shards and non-finite rejection.
+The runtime kernels, dense conversion and NVFP4 expert repack are unchanged.
+
 Sources are `file:line` under `src/`, `include/basalt/` and `tools/convert/`. Model geometry: n_embd 2560, 4
 hyper-connection streams, 48 layers (36 GDN, 12 QSA), 512 experts, top-10, head_dim 256.
 

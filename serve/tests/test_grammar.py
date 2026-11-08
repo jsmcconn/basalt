@@ -348,9 +348,11 @@ class EngineStart(unittest.TestCase):
 
     def test_tokenizer_normalizer_from_pack(self):
         self.engine_args({}, tokenizer_config={"normalizer": "NFC"})
-        self.assertEqual(self.tokenizer_kwargs, {"normalizer": "NFC"})
+        self.assertEqual(self.tokenizer_kwargs, {"pre": "qwen35", "normalizer": "NFC"})
         self.engine_args({})
-        self.assertEqual(self.tokenizer_kwargs, {"normalizer": None})
+        self.assertEqual(self.tokenizer_kwargs, {"pre": "qwen35", "normalizer": None})
+        self.engine_args({}, tokenizer_config={"pre": "joyai-llm", "normalizer": "NFC"})
+        self.assertEqual(self.tokenizer_kwargs, {"pre": "joyai-llm", "normalizer": "NFC"})
 
 
 if __name__ == "__main__":

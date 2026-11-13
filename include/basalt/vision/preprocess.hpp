@@ -21,8 +21,8 @@ struct Image {
 struct Geometry {
     int patch = 16;          ///< pixels per patch side
     int merge = 2;           ///< patches per merged token side
-    int min_tokens = 8;      ///< merged tokens
-    int max_tokens = 4096;
+    int min_tokens = 64;     ///< merged tokens
+    int max_tokens = 16384;
 };
 
 struct Size {

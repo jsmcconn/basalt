@@ -1220,9 +1220,8 @@ class Service:
                     run_id, run_n = None, 0             # the token the thinking is repeating, and how often in a row
                     for ev in opening:
                         yield "event", ev
+                    text_cap_settled = False
                     while True:
-                        if isinstance(ids, PromptText) and ids.max_new:
-                            max_new = ids.max_new       # settled by the engine at PT (a clipped cap)
                         # answer now stops the engine at its own pace: the tokens it still writes are kept, so the
                         # next pass extends exactly what it holds and reads only the close
                         soft = threading.Event() if soft_stops else None
@@ -1252,9 +1251,14 @@ class Service:
                             # a held-back tool argument can leave the stream silent for long: ping after a quiet spell
                             last_out = time.monotonic()
                             for t in gen:
-                                # The engine settles a text prompt's output cap before its first token.
-                                if isinstance(ids, PromptText) and ids.max_new:
-                                    max_new = ids.max_new
+                                if isinstance(ids, PromptText) and ids.n is not None and not text_cap_settled:
+                                    # The engine counts the prompt but reports the cap of this pass.
+                                    # Settle the request's entire output allowance with the same count.
+                                    if capped:
+                                        max_new = ids.settle(ids.n, max_new, self.engine.max_context)
+                                    else:
+                                        max_new = ids.max_new
+                                    text_cap_settled = True
                                 if thinking and not budget_ready and (not isinstance(ids, PromptText) or ids.n is not None):
                                     budget = self.answer_budget(budget_req, max_new, budget)
                                     budget_ready = True

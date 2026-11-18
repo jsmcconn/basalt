@@ -3062,6 +3062,27 @@ class ThinkingBudget(unittest.TestCase):
         self.assertEqual(code, 200, b)
         self.assertEqual(self.engine.caps[0], 20)
 
+    def test_text_prompt_keeps_answer_room_after_a_capped_thinking_pass(self):
+        from serve.prompt import PromptText
+
+        class TextThinkingEngine(ThinkingEngine):
+            takes_text = True
+
+            def generate(self, ids, max_new, sampling, cancel, embeddings=None, session=None):
+                if isinstance(ids, PromptText):
+                    ids, max_new = ids.resolve(max_new, self.max_context)
+                    yield None
+                yield from super().generate(ids, max_new, sampling, cancel, embeddings, session)
+
+        self.engine = self.svc.engine = TextThinkingEngine(self.tok)
+        code, body = self.openai(reasoning_budget_tokens=20)
+        self.assertEqual(code, 200, body)
+        choice = body["choices"][0]
+        self.assertEqual(choice["message"]["content"], self.engine.ANSWER)
+        self.assertEqual(choice["finish_reason"], "stop")
+        self.assertEqual(self.engine.caps[0], 20)
+        self.assertGreater(self.engine.caps[1], 20)
+
     def test_a_thinking_shorter_than_the_budget_answers_as_one_reply(self):
         """The thinking ends inside the capped pass: the answer goes on in a further pass, unchanged."""
         code, b = self.openai(reasoning_budget_tokens=len(ThinkingEngine.THOUGHT) + 5)

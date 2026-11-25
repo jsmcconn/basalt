@@ -34,7 +34,6 @@ UNUSED, NORMAL, CONTROL, USER_DEFINED = 5, 1, 3, 4
 # The pre-tokenizer split of the qwen35 vocabulary as Hugging Face tokenizers writes it.
 QWEN35_HF_SPLIT = (r"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?[\p{L}\p{M}]+|\p{N}"
                    r"| ?[^\s\p{L}\p{M}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+")
-QWEN2_HF_SPLIT = QWEN35_HF_SPLIT.replace(r"[\p{L}\p{M}]+", r"\p{L}+").replace(r"\p{M}", "")
 VALUES_PER_JOB = 1 << 22
 TYPE_ID = {"F32": 0, "F16": 1, "Q8_0": 8, "Q6_K": 14, "BF16": 30}
 E4M3 = S.fp8_e4m3_table()          # a code byte -> its float32 value (the two NaN codes are NaN)
@@ -55,9 +54,9 @@ class Checkpoint:
         self.config = json.loads(cfg.read_text(encoding="utf-8"))
         self.text = self.config.get("text_config", self.config)
         self.files = sorted(self.dir.glob("*.safetensors")) + sorted(self.dir.glob("tensors/*.safetensors"))
-        self.shards = [p for p in self.files if re.fullmatch(r"model-(?:\d+-of-\d+|layer-\d+|tail)\.safetensors", p.name)]
+        self.shards = [p for p in self.files if re.fullmatch(r"model-\d+-of-\d+\.safetensors", p.name)]
         if not self.shards:
-            raise S.ConvertError(f"{self.dir}: no model safetensors shards")
+            raise S.ConvertError(f"{self.dir}: no model-NNNNN-of-NNNNN.safetensors shards")
         side = side or {}
         self.t, self.order = {}, []
         for p in self.files:
@@ -611,9 +610,7 @@ def tokenizer_kv(ck: Checkpoint, pre_name: str = "qwen35", split: str = QWEN35_H
         raise S.ConvertError(f"tokenizer.json: a {model.get('type')} model; only byte-level BPE is converted")
     pre = tj.get("pre_tokenizer") or {}
     splits = [p.get("pattern", {}).get("Regex") for p in pre.get("pretokenizers", []) if p.get("type") == "Split"]
-    configured_qwen35 = (split == QWEN35_HF_SPLIT and tcfg.get("pretokenize_regex") == split
-                         and splits == [QWEN2_HF_SPLIT])
-    if splits != [split] and not configured_qwen35:
+    if splits != [split]:
         raise S.ConvertError(f"tokenizer.json: the pre-tokenizer is not the {pre_name} split")
     n_vocab = int(ck.text["vocab_size"]) if n_vocab is None else int(n_vocab)
     rev = {int(i): t for t, i in model["vocab"].items()}
@@ -646,11 +643,6 @@ def tokenizer_kv(ck: Checkpoint, pre_name: str = "qwen35", split: str = QWEN35_H
     gen = json.loads((d / "generation_config.json").read_text(encoding="utf-8")) if (d / "generation_config.json").is_file() else {}
     kv = {"tokenizer.ggml.model": "gpt2", "tokenizer.ggml.pre": pre_name, "tokenizer.ggml.tokens": tokens,
           "tokenizer.ggml.token_type": types, "tokenizer.ggml.merges": merges}
-    normalizer = tj.get("normalizer")
-    if normalizer is not None:
-        if normalizer != {"type": "NFC"}:
-            raise S.ConvertError(f"tokenizer.json: unsupported normalizer {normalizer}")
-        kv["tokenizer.ggml.normalizer"] = "NFC"
     eos, pad = token_id("eos_token"), token_id("pad_token")
     bos = token_id("bos_token")
     if bos is None:
@@ -756,58 +748,10 @@ def model_kv(ck: Checkpoint, ple_dim: int, file_type: int, name: str | None) -> 
     return kv
 
 
-def _ple_bf16_job(args):
-    path, off, rows = args
-    raw = np.fromfile(path, dtype="<u2", count=rows * S.PLE_DIM, offset=off)
-    x = S._bf16_to_f32(raw)
-    if not np.isfinite(x).all():
-        raise S.ConvertError("the BF16 n-gram table holds a non-finite value")
-    return S.q8_0(x)
-
-
-class PleBf16:
-    """Split BF16 n-gram shards, in numeric shard order, as Q8_0 rows."""
-
-    def __init__(self, ck: Checkpoint, chunk_rows: int = 65536):
-        self.chunk_rows = chunk_rows
-        shards = {}
-        stems = set()
-        for name, (path, off, dt, shape, size) in ck.t.items():
-            m = re.fullmatch(r"(.+\.ngram_embedding\.)shard_(\d+)\.weight", name)
-            if not m:
-                continue
-            i = int(m.group(2))
-            if dt != "BF16" or len(shape) != 2 or shape[0] <= 0 or shape[1] != S.PLE_DIM \
-                    or size != shape[0] * S.PLE_DIM * 2 or i in shards:
-                raise S.ConvertError(f"{name}: expected unique BF16 rows of {S.PLE_DIM}")
-            stems.add(m.group(1))
-            shards[i] = (path, off, shape[0])
-        if len(stems) != 1 or sorted(shards) != list(range(len(shards))):
-            raise S.ConvertError("the BF16 n-gram table needs one complete contiguous set of shards")
-        expected = int(ck.text["split_ngram_parts"])
-        if len(shards) != expected:
-            raise S.ConvertError(f"the BF16 n-gram table has {len(shards)} shards, expected {expected}")
-        self.shards = [shards[i] for i in range(expected)]
-        self.paths = sorted({p for p, _, _ in self.shards})
-        self.rows = sum(rows for _, _, rows in self.shards)
-        self.nbytes = self.rows * (S.PLE_DIM // 32 * 34)
-        self.scale = None
-        self.conversion = {"src_type": "BF16", "dst_type": "Q8_0", "scale": self.scale,
-                           "method": "BF16 values, Q8_0 blocks of 32 (ggml reference rounding)"}
-
-    def jobs(self):
-        for path, off, rows in self.shards:
-            for r in range(0, rows, self.chunk_rows):
-                yield path, off + r * S.PLE_DIM * 2, min(self.chunk_rows, rows - r)
-
-    def chunks(self, pool, depth: int = 16):
-        yield from bounded_imap(pool, _ple_bf16_job, self.jobs(), depth)
-
-
 def ple_table(ck: Checkpoint):
-    """Read NVFP4, FP8 or split BF16 n-gram table shards as Q8_0 rows."""
-    if any(re.search(r"ngram_embedding\.shard_\d+\.weight$", k) and t[2] == "BF16" for k, t in ck.t.items()):
-        return PleBf16(ck)
+    """The n-gram table's reader: NVFP4 shards with one FP32 weight_scale_2 (PleNvfp4), or FP8 shards with one BF16
+    weight_scale (model_sections.PleFp8, given the files that hold them; a release that consolidated its files may
+    spread them over several)."""
     if any(k.endswith("ngram_embedding.weight_scale_2") for k in ck.t):
         return PleNvfp4(ck)
     hits = sorted({ck.t[k][0] for k in ck.t
